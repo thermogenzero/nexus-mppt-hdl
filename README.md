@@ -179,7 +179,10 @@ make test-povc
 
 ## Related Repositories
 
-- [thermogenzero/teg-opti-hdl](https://github.com/thermogenzero/teg-opti-hdl) - Legacy 36-channel controller
+- [thermogenzero/nexus-mppt-hardware](https://github.com/thermogenzero/nexus-mppt-hardware) - Nexus 40K FPGA node board (pairs with this HDL)
+- [thermogenzero/teg-pcb](https://github.com/thermogenzero/teg-pcb) - Analog TEG power board (connects via 1-2 ft cable)
+- [thermogenzero/teg-opti-hdl](https://github.com/thermogenzero/teg-opti-hdl) - Legacy 36-channel controller (superseded)
+- [thermogenzero/teg-opti-hardware](https://github.com/thermogenzero/teg-opti-hardware) - Legacy TEG-Opti board (superseded)
 - [synergycarbon/povc-carbon](https://github.com/synergycarbon/povc-carbon) - Carbon credit minting (consumes PoVC)
 - [synergythermogen/ip](https://github.com/synergythermogen/ip) - IP and patent portfolio
 
