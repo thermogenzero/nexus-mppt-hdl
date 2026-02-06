@@ -16,17 +16,21 @@ This document tracks the estream platform features consumed by Thermogen Zero an
 | Total Duration | 54-74 weeks | 27-38 weeks | **50%** |
 | Engineering Cost | ~$270K-370K | ~$135K-190K | **~$180K** |
 
-### Cost Savings from Marketplace Components
+### Cost Savings from Marketplace Components + Platform Features
 
 | Component | Build Cost (Original) | Marketplace Cost | Savings |
 |-----------|----------------------|------------------|---------|
-| Remote Bitstream Update | ~$50K (8-12 wks) | $0 (early adopter) | **$50K** |
+| Remote Bitstream Update (PQ crypto) | ~$60K (10-14 wks) | $0 (early adopter) | **$60K** |
 | PoVC Witness Generation | ~$75K (10-14 wks) | $0 (early adopter) | **$75K** |
 | Nexus 40K Integration | ~$100K (16-20 wks) | $0 (early adopter) | **$100K** |
-| Industrial Gateway | ~$30K (custom) | $0 (early adopter) | **$30K** |
-| **Total** | **~$255K** | **$0** | **$255K** |
+| Industrial Gateway V2 | ~$40K (custom) | $0 (early adopter) | **$40K** |
+| Node HA Engine | ~$25K (4-6 wks) | $0 (platform) | **$25K** |
+| HAS Offline Engine | ~$20K (3-5 wks) | $0 (platform) | **$20K** |
+| Wire Protocol | ~$15K (2-4 wks) | $0 (platform) | **$15K** |
+| Witness ESCIR Circuits | ~$20K (3-5 wks) | $0 (platform) | **$20K** |
+| **Total** | **~$355K** | **$0** | **$355K** |
 
-*Estimates based on $5K/week engineering cost*
+*Estimates based on $5K/week engineering cost. Updated to reflect post-quantum crypto upgrade (ML-DSA-87 vs Ed25519) and additional platform features.*
 
 ---
 
@@ -89,15 +93,28 @@ enforcer.register_tenant(TenantQuota {
 let attestation = IsolationAttestation::generate(&partition, &signer)?;
 ```
 
-### Industrial Gateway (Feature 1)
+### Industrial Gateway V2 (Feature 1)
 
-**Status:** ✅ Available - Marketplace #424
+**Status:** ✅ Implemented - Marketplace #424 (V2 Layered Architecture)
 
-| Protocol | Support | Usage |
-|----------|---------|-------|
-| MODBUS TCP | ✅ | SCADA integration |
-| MODBUS RTU | ✅ | Legacy devices |
-| OPC-UA | ✅ | Modern SCADA |
+The upstream `crates/estream-industrial/` crate provides a complete implementation with layered composable architecture:
+
+| Protocol | Support | Crate Feature | Usage |
+|----------|---------|---------------|-------|
+| MODBUS TCP | ✅ | `modbus-tcp` (default) | SCADA integration |
+| MODBUS RTU | ✅ | `modbus-rtu` | Legacy devices |
+| OPC-UA | ✅ | `opcua` | Modern SCADA |
+| DNP3 | ✅ | `dnp3` | Utility SCADA |
+
+**Marketplace Tiers:**
+
+| Tier | SKU | Protocols | Price |
+|------|-----|-----------|-------|
+| Lite | `industrial-gateway-lite` | MODBUS TCP only | Free (Apache-2.0) |
+| Standard | `industrial-gateway-standard` | TCP + RTU + OPC-UA | 100 ES/mo ($0 early adopter) |
+| Premium | `industrial-gateway-premium` | Standard + DNP3, NERC-CIP | 300 ES/mo |
+
+**V2 Architecture:** Transport layer (TCP, Serial, UDP) + Protocol layer (MODBUS, OPC-UA, DNP3 as ESF schemas) + StreamSight integration. ESCIR circuit definitions available at `circuits/industrial/`.
 
 **How We Use It:**
 ```yaml
@@ -121,6 +138,66 @@ gateway:
         baud: 9600
 ```
 
+### Node High Availability (Feature 5)
+
+**Status:** ✅ Implemented - Ready to Use
+
+Addresses upstream Feature Request #5 (Redundant Node Failover). Critical for wellpad deployments where infrastructure requires 99.99% uptime.
+
+| Component | Implementation | Usage |
+|-----------|----------------|-------|
+| Node HA Engine | `fpga/rtl/ha/node_ha_engine.v` | Active/passive failover |
+| HA Crate | `crates/estream-ha/` | State synchronization, split-brain prevention |
+
+**How We Use It:** Each wellpad estream Node can run in active/passive mode with automatic failover on heartbeat loss. State synchronization ensures consistent lex views across nodes.
+
+### HAS Offline Engine (Feature 2)
+
+**Status:** ✅ Implemented - Ready to Use
+
+Addresses upstream Feature Request #2 (Offline Operation). Essential for remote wellpads with intermittent Starlink/cellular connectivity.
+
+| Component | Implementation | Usage |
+|-----------|----------------|-------|
+| HAS Offline Engine | `fpga/rtl/has/has_offline_engine.v` | Hardware-attested offline buffering |
+| HAS Offline Crate | `crates/estream-has-offline/` | 30+ day offline operation |
+
+**How We Use It:** TEG-Opti nodes continue generating PoVC-attested telemetry during network outages. On reconnect, buffered data auto-syncs with conflict resolution and compressed batch upload.
+
+### Wire Protocol (Phase 3 Foundation)
+
+**Status:** ✅ Implemented - Ready to Use
+
+Fully implemented estream wire protocol that forms the basis for Phase 3 (estream Protocol Native).
+
+| Component | Implementation | Usage |
+|-----------|----------------|-------|
+| Wire Protocol | `crates/estream-wire/` | UDP binary protocol |
+| Magic | `0x45535452` ("ESTR") | Frame identification |
+| Packet Types | `0x01-0x8F` ranges | Full protocol coverage |
+| Witness Messages | `0x80-0x8F` | PoVC attestation wire format |
+
+**Performance:** 1-5us latency (UDP) vs 50-500us (TCP). FPGA-optimized for direct hardware integration.
+
+### Witness ESCIR Circuits (Phase 2 Foundation)
+
+**Status:** ✅ Implemented - Ready to Use
+
+Four ESCIR circuit definitions for witness generation and verification, providing the framework for Phase 2 (PoVC Integration).
+
+| Circuit | Version | Est. LUTs | Usage |
+|---------|---------|-----------|-------|
+| `vrf-output-hash` | v0.5.0 | ~5,000 | SHA3-256 VRF output computation |
+| `vrf-threshold-check` | v0.5.0 | ~100 | Witness selection qualification |
+| `witness-aggregator` | v0.5.0 | ~120 | Multi-tier attestation aggregation |
+| `witness-selection` | v0.5.0, v0.8.0 | ~250-3,000 | VRF-based witness selection with stake weighting |
+
+**Supporting RTL:**
+- `fpga/rtl/crypto/vrf_selector.v` - VRF-based witness selection
+- `fpga/rtl/crypto/vrf_evaluator.v` - VRF evaluation engine
+- `fpga/rtl/iso20022/povc_witness_gen.v` - Reference PoVC witness generation
+- `fpga/rtl/crypto/prime_signer.v` - Hardware attestation signing
+
 ---
 
 ## Marketplace Components (Early Adopter - FREE)
@@ -138,11 +215,15 @@ gateway:
 - **SKU:** `teg-opti-remote-update`
 - **Normal Price:** 100 ES/mo
 - **Early Adopter Price:** $0 (24 months)
+- **Upstream Reference:** `fpga/rtl/prime/t0_bitstream_manager.v` (831 lines)
 - **Contents:**
-  - `fpga/rtl/update/bitstream_rx.v`
-  - `fpga/rtl/update/flash_manager.v`
-  - `fpga/rtl/update/ed25519_verify.v`
-  - `fpga/rtl/update/watchdog.v`
+  - `fpga/rtl/update/bitstream_rx.v` - Receive state machine
+  - `fpga/rtl/update/flash_manager.v` - Dual-slot + FRAM inventory (64 bitstreams, 4MB each)
+  - `fpga/rtl/update/ml_dsa87_verify.v` - ML-DSA-87 post-quantum signature verification
+  - `fpga/rtl/update/governance.v` - k-of-n threshold approval (configurable, default 5-of-9)
+  - `fpga/rtl/update/watchdog.v` - Failback watchdog with monotonic rollback protection
+- **Security:** ML-DSA-87 signing (4627-byte signatures) + ML-KEM-1024 session key encryption
+- **Deployment:** Integrates with `estream-deployment` canary/staged rollout strategies
 
 ### Nexus 40K Integration
 - **SKU:** `nexus-40k-integration`
@@ -184,8 +265,12 @@ gateway:
 | ML-DSA-87 Verilog core | HIGH (needed) | LOW (in marketplace) | Eliminated |
 | Fleet management complexity | HIGH (custom) | LOW (NetworkManager) | Eliminated |
 | Tenant isolation security | HIGH (custom) | LOW (TLA+ verified) | Eliminated |
-| SCADA integration | MEDIUM (custom) | LOW (marketplace) | Eliminated |
-| Remote update reliability | HIGH (custom) | LOW (proven RTL) | Eliminated |
+| SCADA integration | MEDIUM (custom) | LOW (V2 layered gateway) | Eliminated |
+| Remote update reliability | HIGH (custom) | LOW (831-line proven RTL) | Eliminated |
+| Node failover / uptime | HIGH (custom HA) | LOW (node_ha_engine.v) | Eliminated |
+| Offline operation (30+ days) | HIGH (custom) | LOW (has_offline_engine.v) | Eliminated |
+| Wire protocol implementation | MEDIUM (custom) | LOW (estream-wire crate) | Eliminated |
+| Witness framework | HIGH (custom crypto) | LOW (4 ESCIR circuits + VRF RTL) | Eliminated |
 
 ---
 
@@ -195,6 +280,10 @@ gateway:
 - [Deployment Framework Guide](https://docs.estream.io/deployment)
 - [Industrial IoT Client Architecture](https://docs.estream.io/industrial-iot)
 - [Tenant Isolation Specification](https://docs.estream.io/isolation)
+- [Wire Protocol Specification](https://docs.estream.io/wire-protocol)
+- [PoVC Witness Framework](https://docs.estream.io/witness)
+- [High Availability Guide](https://docs.estream.io/ha)
+- [HAS Offline Operation](https://docs.estream.io/has-offline)
 
 ## Contact
 

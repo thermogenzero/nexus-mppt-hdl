@@ -11,7 +11,9 @@ nexus-mppt-hdl is the next-generation FPGA-based Maximum Power Point Tracking (M
 - **108 Independent MPPT Channels** - 3× density vs legacy 36-channel TEG-Opti
 - **Hardware PoVC Attestation** - Built-in witness generation for carbon credit verification
 - **estream Native Protocol** - Direct platform integration (no serial bridge)
-- **Remote Bitstream Updates** - Secure OTA updates with watchdog failback
+- **Remote Bitstream Updates** - Secure OTA with ML-DSA-87 signing, governance threshold, and watchdog failback
+- **Post-Quantum Security** - ML-DSA-87 signatures + ML-KEM-1024 encryption (inherited from estream platform)
+- **High Availability** - Node failover and HAS offline buffering for 30+ day outages
 - **66% Board Count Reduction** - 19 nodes vs 56 boards per 10 kW system
 
 ## Architecture
@@ -39,7 +41,8 @@ nexus-mppt-hdl is the next-generation FPGA-based Maximum Power Point Tracking (M
 │   │                                                                 │    │
 │   │  ┌──────────────────────────────────────────────────────────┐ │    │
 │   │  │              Remote Update Engine                         │ │    │
-│   │  │              Dual-slot flash, Ed25519 verify, Watchdog    │ │    │
+│   │  │              ML-DSA-87 sign, ML-KEM-1024, Governance k/n  │ │    │
+│   │  │              Dual-slot flash, FRAM inventory, Watchdog    │ │    │
 │   │  └──────────────────────────────────────────────────────────┘ │    │
 │   │                                                                 │    │
 │   └───────────────────────────────────────────────────────────────┘│    │
@@ -74,11 +77,12 @@ nexus-mppt-hdl/
 │   │   ├── wire_encoder.v      # Wire protocol framing
 │   │   ├── stream_emitter.v    # Telemetry stream
 │   │   └── discovery.v         # Node auto-registration
-│   ├── update/                 # Remote bitstream update
+│   ├── update/                 # Remote bitstream update (from estream marketplace)
 │   │   ├── bitstream_rx.v      # Receive state machine
-│   │   ├── flash_manager.v     # Dual-slot management
-│   │   ├── ed25519_verify.v    # Signature verification
-│   │   └── watchdog.v          # Failback watchdog
+│   │   ├── flash_manager.v     # Dual-slot + FRAM inventory management
+│   │   ├── ml_dsa87_verify.v   # ML-DSA-87 post-quantum signature verification
+│   │   ├── governance.v        # k-of-n threshold approval
+│   │   └── watchdog.v          # Failback watchdog with monotonic rollback
 │   └── safety/                 # Safety systems
 │       ├── overvoltage.v       # 58V bus protection
 │       └── ground_fault.v      # Ground fault detection
@@ -110,7 +114,9 @@ nexus-mppt-hdl/
 | Protocol | BFST serial | estream native |
 | Remote Update | Hardware only | Full implementation |
 | Boards per 10 kW | 56 + controller | 19 nodes |
-| Security | None | Ed25519 + attestation |
+| Security | None | ML-DSA-87 + ML-KEM-1024 + attestation |
+| Offline | None | HAS buffering (30+ days) |
+| Availability | Single node | HA failover (active/passive) |
 
 ## Implementation Timeline
 
@@ -126,12 +132,23 @@ nexus-mppt-hdl/
 
 This project leverages estream marketplace components (free via early adopter program):
 
-| Component | SKU | Status |
-|-----------|-----|--------|
-| PoVC Witness Generation | `teg-opti-povc-witness` | Integrating |
-| Remote Bitstream Update | `teg-opti-remote-update` | Integrating |
-| Nexus 40K Integration | `nexus-40k-integration` | Planned |
-| Industrial Gateway | `industrial-gateway-standard` | Planned |
+| Component | SKU | Status | Upstream Implementation |
+|-----------|-----|--------|------------------------|
+| PoVC Witness Generation | `teg-opti-povc-witness` | Available | ESCIR circuits (4 types), VRF selector RTL |
+| Remote Bitstream Update | `teg-opti-remote-update` | Available | `t0_bitstream_manager.v` (831 lines), deployment framework |
+| Nexus 40K Integration | `nexus-40k-integration` | Available | Witness aggregation circuits, NTT engines |
+| Industrial Gateway | `industrial-gateway-standard` | Available | `estream-industrial` crate, V2 layered architecture |
+
+### Additional Platform Features Available
+
+| Feature | Implementation | Usage |
+|---------|---------------|-------|
+| Node HA Engine | `fpga/rtl/ha/node_ha_engine.v` | Active/passive failover for critical infrastructure |
+| HAS Offline Engine | `fpga/rtl/has/has_offline_engine.v` | 30+ day offline buffering with auto-resync |
+| Wire Protocol | `crates/estream-wire/` | UDP binary protocol (1-5us latency), magic `0x45535452` |
+| Deployment Framework | `crates/estream-deployment/` | Canary, staged, rolling, blue-green strategies |
+| Tenant FPGA Isolation | `fpga/rtl/isolation/` | Hardware-enforced isolation with TLA+ verification |
+| StreamSight | `fpga/rtl/streamsight/` | Real-time observability and alerting |
 
 ## Building
 

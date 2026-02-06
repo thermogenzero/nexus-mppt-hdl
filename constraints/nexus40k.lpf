@@ -1,0 +1,84 @@
+# =============================================================================
+# nexus-mppt-hdl Pin Constraints
+# Target: Lattice Nexus 40K (LIFCL-40) - BGA256
+# =============================================================================
+#
+# Pin assignments are preliminary and will be finalized during PCB design.
+# This file establishes the I/O standard and initial mapping.
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Clock and Reset
+# -----------------------------------------------------------------------------
+LOCATE COMP "clk_50mhz"     SITE "A5";
+IOBUF  PORT "clk_50mhz"     IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk_50mhz"  50.0 MHz;
+
+LOCATE COMP "rst_n"          SITE "B4";
+IOBUF  PORT "rst_n"          IO_TYPE=LVCMOS33 PULLMODE=UP;
+
+# -----------------------------------------------------------------------------
+# SPI Flash (Dual-Slot Bitstream Storage)
+# -----------------------------------------------------------------------------
+LOCATE COMP "flash_cs_n"     SITE "C3";
+LOCATE COMP "flash_sclk"     SITE "C4";
+LOCATE COMP "flash_mosi"     SITE "D3";
+LOCATE COMP "flash_miso"     SITE "D4";
+IOBUF  PORT "flash_cs_n"     IO_TYPE=LVCMOS33;
+IOBUF  PORT "flash_sclk"     IO_TYPE=LVCMOS33;
+IOBUF  PORT "flash_mosi"     IO_TYPE=LVCMOS33;
+IOBUF  PORT "flash_miso"     IO_TYPE=LVCMOS33;
+
+# -----------------------------------------------------------------------------
+# FRAM (Inventory + Audit Log)
+# -----------------------------------------------------------------------------
+LOCATE COMP "fram_cs_n"      SITE "E3";
+LOCATE COMP "fram_sclk"      SITE "E4";
+LOCATE COMP "fram_mosi"      SITE "F3";
+LOCATE COMP "fram_miso"      SITE "F4";
+IOBUF  PORT "fram_cs_n"      IO_TYPE=LVCMOS33;
+IOBUF  PORT "fram_sclk"      IO_TYPE=LVCMOS33;
+IOBUF  PORT "fram_mosi"      IO_TYPE=LVCMOS33;
+IOBUF  PORT "fram_miso"      IO_TYPE=LVCMOS33;
+
+# -----------------------------------------------------------------------------
+# Ethernet RGMII (estream Wire Protocol - Phase 3)
+# -----------------------------------------------------------------------------
+# Placeholder - will be populated in Phase 3
+# LOCATE COMP "eth_txd[0]"   SITE "...";
+# LOCATE COMP "eth_rxd[0]"   SITE "...";
+
+# -----------------------------------------------------------------------------
+# Status LEDs
+# -----------------------------------------------------------------------------
+LOCATE COMP "led_heartbeat"  SITE "N16";
+LOCATE COMP "led_update"     SITE "P16";
+LOCATE COMP "led_error"      SITE "R16";
+IOBUF  PORT "led_heartbeat"  IO_TYPE=LVCMOS33;
+IOBUF  PORT "led_update"     IO_TYPE=LVCMOS33;
+IOBUF  PORT "led_error"      IO_TYPE=LVCMOS33;
+
+# -----------------------------------------------------------------------------
+# ADC Interface (9x ADS7950 SPI - Phase 4)
+# -----------------------------------------------------------------------------
+# Placeholder - will be populated in Phase 4
+
+# -----------------------------------------------------------------------------
+# PWM Outputs (108 channels - Phase 4)
+# -----------------------------------------------------------------------------
+# Placeholder - will be populated in Phase 4
+
+# -----------------------------------------------------------------------------
+# Safety Outputs
+# -----------------------------------------------------------------------------
+LOCATE COMP "epo_out_n"      SITE "H3";
+LOCATE COMP "gfdi_sense"     SITE "H4";
+IOBUF  PORT "epo_out_n"      IO_TYPE=LVCMOS33;
+IOBUF  PORT "gfdi_sense"     IO_TYPE=LVCMOS33;
+
+# -----------------------------------------------------------------------------
+# Timing Constraints
+# -----------------------------------------------------------------------------
+BLOCK RESETPATHS;
+BLOCK ASYNCPATHS;
