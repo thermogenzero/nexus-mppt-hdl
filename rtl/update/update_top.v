@@ -261,7 +261,7 @@ module update_top #(
                     if (flash_write_done) begin
                         orch_state <= O_SWAPPING;
                         flash_swap <= 1'b1;
-                    end else if (flash_write_error) begin
+                    end else if (flash_write_error || rx_error) begin
                         orch_state <= O_ERROR;
                     end
                 end

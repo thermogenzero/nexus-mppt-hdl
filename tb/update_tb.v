@@ -2,12 +2,13 @@
 // Testbench: Update Subsystem
 // =============================================================================
 // Tests the complete Phase 1 remote bitstream update flow:
-//   1. Header reception and parsing
-//   2. Governance approval (k-of-n threshold)
-//   3. ML-DSA-87 signature verification (via TSSP)
-//   4. Flash write and slot swap
-//   5. Watchdog boot monitoring
-//   6. Error cases (bad magic, timeout, rollback)
+//   1. Reset and initialization
+//   2. Header reception and parsing
+//   3. Governance approval (k-of-n threshold)
+//   4. ML-DSA-87 signature verification (via TSSP)
+//   5. Flash write and slot swap
+//   6. Watchdog boot monitoring
+//   7. End-to-end completion verification
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -18,8 +19,19 @@ module update_tb;
     // PARAMETERS
     // =========================================================================
 
-    parameter CLK_PERIOD = 20;  // 50 MHz
+    parameter CLK_PERIOD  = 20;   // 50 MHz
     parameter HEADER_SIZE = 64;
+    parameter PAYLOAD_SIZE = 256;
+
+    // Orchestration states (mirror update_top)
+    localparam O_IDLE      = 4'd0;
+    localparam O_RECEIVING = 4'd1;
+    localparam O_GOVERNANCE= 4'd2;
+    localparam O_VERIFY    = 4'd3;
+    localparam O_WRITING   = 4'd4;
+    localparam O_SWAPPING  = 4'd5;
+    localparam O_DONE      = 4'd6;
+    localparam O_ERROR     = 4'd7;
 
     // =========================================================================
     // DUT SIGNALS
@@ -128,6 +140,46 @@ module update_tb;
     always #(CLK_PERIOD/2) clk = ~clk;
 
     // =========================================================================
+    // CRC32 FUNCTION (IEEE 802.3, polynomial 0xEDB88320 reflected)
+    // =========================================================================
+    // Matches the implementation in bitstream_rx.v exactly.
+
+    function [31:0] crc32_byte;
+        input [31:0] crc_in;
+        input [7:0]  data_in;
+        reg [31:0] c;
+        reg [7:0]  d;
+        integer k;
+        begin
+            c = crc_in;
+            d = data_in;
+            for (k = 0; k < 8; k = k + 1) begin
+                if ((c[0] ^ d[0]) == 1'b1)
+                    c = {1'b0, c[31:1]} ^ 32'hEDB88320;
+                else
+                    c = {1'b0, c[31:1]};
+                d = {1'b0, d[7:1]};
+            end
+            crc32_byte = c;
+        end
+    endfunction
+
+    // =========================================================================
+    // PRE-COMPUTE PAYLOAD CRC
+    // =========================================================================
+    // Payload is bytes 0x00 through 0xFF (256 bytes).
+
+    reg [31:0] payload_crc;
+    integer ci;
+    initial begin
+        payload_crc = 32'hFFFFFFFF;
+        for (ci = 0; ci < PAYLOAD_SIZE; ci = ci + 1) begin
+            payload_crc = crc32_byte(payload_crc, ci[7:0]);
+        end
+        payload_crc = ~payload_crc;
+    end
+
+    // =========================================================================
     // TEST HELPERS
     // =========================================================================
 
@@ -160,28 +212,36 @@ module update_tb;
         end
     endtask
 
-    // Send a single byte on the rx interface
+    // Send a single byte on the rx interface with AXI-Stream handshake.
+    // Drives signals at negedge so DUT reliably samples at posedge.
     integer byte_count;
     integer wait_count;
     task send_byte;
         input [7:0] data;
         input        last;
         begin
-            @(posedge clk);
+            // Drive data at negedge (stable by next posedge)
+            @(negedge clk);
             rx_data  = data;
             rx_valid = 1;
             rx_last  = last;
 
+            // Wait for handshake (valid & ready both high at posedge)
             wait_count = 0;
             @(posedge clk);
-            while (!rx_ready && wait_count < 1000) begin
+            while (!rx_ready && wait_count < 5000) begin
                 @(posedge clk);
                 wait_count = wait_count + 1;
             end
 
-            if (wait_count >= 1000)
-                $display("  WARN: send_byte stuck at byte %0d", byte_count);
+            if (wait_count >= 5000) begin
+                $display("  FAIL: send_byte stuck at byte %0d (waited %0d cycles)",
+                         byte_count, wait_count);
+                test_fail_count = test_fail_count + 1;
+            end
 
+            // Deassert at negedge
+            @(negedge clk);
             rx_valid = 0;
             rx_last  = 0;
             byte_count = byte_count + 1;
@@ -212,24 +272,24 @@ module update_tb;
                 send_byte(8'h00, 0);
             end
 
-            // Bytes 8-11: Size (big-endian) - maps to header_buffer[447:416]
+            // Bytes 8-11: Size (big-endian)
             send_byte(size[31:24], 0);
             send_byte(size[23:16], 0);
             send_byte(size[15:8],  0);
             send_byte(size[7:0],   0);
 
-            // Bytes 12-15: CRC32 - maps to header_buffer[415:384]
+            // Bytes 12-15: CRC32
             send_byte(crc32[31:24], 0);
             send_byte(crc32[23:16], 0);
             send_byte(crc32[15:8],  0);
             send_byte(crc32[7:0],   0);
 
-            // Bytes 16-47: Signature (32 bytes of 0xAA) - maps to [383:128]
+            // Bytes 16-47: Signature (32 bytes of 0xAA)
             for (i = 0; i < 32; i = i + 1) begin
                 send_byte(8'hAA, 0);
             end
 
-            // Bytes 48-63: Governance hash (16 bytes of 0xBB) - maps to [127:0]
+            // Bytes 48-63: Governance hash (16 bytes of 0xBB)
             for (i = 0; i < 16; i = i + 1) begin
                 send_byte(8'hBB, 0);
             end
@@ -250,39 +310,75 @@ module update_tb;
         end
     endtask
 
-    // Respond to TSSP verification request (with timeout)
+    // Respond to TSSP verification request
+    // Uses negedge-aligned blocking assignments to avoid NBA race conditions
+    // with the DUT's posedge-sampled inputs.
     integer tssp_wait;
     task tssp_respond;
         input pass;
         begin
-            // Wait for TSSP request (with timeout)
+            // Wait for TSSP request with timeout
             tssp_wait = 0;
-            while (!tssp_req_valid && tssp_wait < 5000) begin
+            while (!tssp_req_valid && tssp_wait < 10000) begin
                 @(posedge clk);
                 tssp_wait = tssp_wait + 1;
             end
 
             if (tssp_req_valid) begin
-                tssp_req_ready <= 1;
-                @(posedge clk);
-                tssp_req_ready <= 0;
+                $display("  TSSP request received after %0d cycles (cmd=0x%02h)",
+                         tssp_wait, tssp_req_cmd);
 
-                // Send response after a delay (simulating crypto time)
-                #(CLK_PERIOD * 10);
-                tssp_resp_valid  <= 1;
-                tssp_resp_pass   <= pass;
-                tssp_resp_status <= pass ? 8'h00 : 8'hFF;
-                @(posedge clk);
-                tssp_resp_valid <= 0;
+                // Accept the request (set at negedge so DUT sees it at next posedge)
+                @(negedge clk);
+                tssp_req_ready = 1;
+                @(posedge clk);     // DUT samples req_ready=1 here
+                @(negedge clk);
+                tssp_req_ready = 0;
+
+                // Simulate crypto verification time (~10 cycles)
+                repeat(10) @(posedge clk);
+
+                // Send response (set at negedge so DUT sees it at next posedge)
+                @(negedge clk);
+                tssp_resp_valid  = 1;
+                tssp_resp_pass   = pass;
+                tssp_resp_status = pass ? 8'h00 : 8'hFF;
+                @(posedge clk);     // DUT samples resp_valid=1 here
+                @(posedge clk);     // Hold one extra cycle for safety
+                @(negedge clk);
+                tssp_resp_valid  = 0;
+
+                $display("  TSSP verification complete (pass=%0b)", pass);
             end else begin
-                $display("  WARNING: TSSP request not received (timeout)");
+                $display("  FAIL: TSSP request not received (timeout %0d cycles)",
+                         tssp_wait);
+                test_fail_count = test_fail_count + 1;
+            end
+        end
+    endtask
+
+    // Wait for a specific orchestration state with timeout
+    integer state_wait;
+    task wait_for_state;
+        input [3:0] target_state;
+        input integer max_cycles;
+        begin
+            state_wait = 0;
+            while (update_state != target_state && state_wait < max_cycles) begin
+                @(posedge clk);
+                state_wait = state_wait + 1;
+            end
+            if (state_wait >= max_cycles) begin
+                $display("  FAIL: Timed out waiting for state %0d (stuck at %0d after %0d cycles)",
+                         target_state, update_state, state_wait);
+                test_fail_count = test_fail_count + 1;
             end
         end
     endtask
 
     task check;
         input        condition;
-        input [255:0] message;
+        input [639:0] message;  // wider for longer messages
         begin
             if (condition) begin
                 $display("  PASS: %0s", message);
@@ -311,16 +407,19 @@ module update_tb;
         $display("  Phase 1: Remote Bitstream Update");
         $display("==========================================================");
         $display("");
+        $display("  Payload CRC32: 0x%08h", payload_crc);
+        $display("");
 
         // =====================================================================
         // TEST 1: Reset and Initialization
         // =====================================================================
         $display("[TEST 1] Reset and Initialization");
         reset;
-        check(!update_busy,   "Not busy after reset");
-        check(!update_error,  "No error after reset");
-        check(!update_done,   "Not done after reset");
-        check(active_slot == 0, "Active slot is A after reset");
+        check(!update_busy,       "Not busy after reset");
+        check(!update_error,      "No error after reset");
+        check(!update_done,       "Not done after reset");
+        check(active_slot == 0,   "Active slot is A after reset");
+        check(update_state == O_IDLE, "Orchestration in IDLE");
         $display("");
 
         // =====================================================================
@@ -328,23 +427,22 @@ module update_tb;
         // =====================================================================
         $display("[TEST 2] Header Reception");
         update_enable <= 1;
-        #(CLK_PERIOD * 10);
+        #(CLK_PERIOD * 5);
 
-        // Debug: check FSM states propagated
-        $display("  DEBUG: orch_state=%0d, rx_state=%0d, rx_ready=%0b",
-                 dut.orch_state, dut.u_bitstream_rx.state, rx_ready);
+        check(update_state == O_RECEIVING, "Transitioned to RECEIVING");
+        check(rx_ready, "RX ready for header data");
 
-        // Send a valid header: version=1, size=256 bytes, crc=0xDEADBEEF
+        // Send a valid header: version=1, size=256 bytes, crc=computed
         byte_count = 0;
-        send_header(32'd1, 32'd256, 32'hDEADBEEF);
-        $display("  DEBUG: %0d header bytes sent", byte_count);
+        send_header(32'd1, PAYLOAD_SIZE, payload_crc);
 
-        $display("  DEBUG: Header sent. rx_state=%0d, hdr_valid=%0b, rx_error=%0b",
-                 dut.u_bitstream_rx.state, dut.u_bitstream_rx.hdr_valid,
-                 dut.u_bitstream_rx.rx_error);
+        $display("  %0d header bytes sent", byte_count);
 
-        #(CLK_PERIOD * 10);
+        // Wait for header to be parsed and orchestration to advance
+        #(CLK_PERIOD * 5);
         check(update_busy, "Busy during update");
+        check(update_state == O_GOVERNANCE || update_state == O_VERIFY,
+              "Advanced past RECEIVING after header");
         $display("");
 
         // =====================================================================
@@ -357,57 +455,90 @@ module update_tb;
         submit_approval(8'd1);
         submit_approval(8'd2);
 
-        #(CLK_PERIOD * 20);
-        check(governance_approvals >= 3, "3 governance approvals received");
+        // Wait for governance to complete and orch to advance
+        wait_for_state(O_VERIFY, 1000);
+
+        check(governance_approvals >= 3, "3 governance approvals counted");
+        check(update_state == O_VERIFY, "Transitioned to VERIFY");
         $display("");
 
         // =====================================================================
-        // TEST 4: TSSP Signature Verification
+        // TEST 4: ML-DSA-87 Signature Verification (TSSP)
         // =====================================================================
         $display("[TEST 4] ML-DSA-87 Signature Verification (TSSP)");
 
-        // Respond to TSSP verification with pass
-        fork
-            tssp_respond(1);
-        join
+        // The ml_dsa87_verify module should have already sent a TSSP request
+        // (hash-only mode, skipping sig loading). Respond with pass.
+        tssp_respond(1);
 
-        #(CLK_PERIOD * 50);
-        $display("  Update state: %0d", update_state);
+        // Debug: trace ml_dsa87 and orchestration state after TSSP
+        $display("  DEBUG: ml_dsa87_state=%0d verify_done=%0b verify_pass=%0b",
+                 dut.u_ml_dsa87.state, dut.u_ml_dsa87.verify_done,
+                 dut.u_ml_dsa87.verify_pass);
+        $display("  DEBUG: orch_state=%0d", dut.orch_state);
+
+        // Wait for verification to complete and orch to advance
+        wait_for_state(O_WRITING, 1000);
+
+        check(update_state == O_WRITING, "Transitioned to WRITING");
         $display("");
 
         // =====================================================================
-        // TEST 5: Wait for flash write (simplified)
+        // TEST 5: Flash Write (256 payload bytes)
         // =====================================================================
-        $display("[TEST 5] Flash Write");
+        $display("[TEST 5] Flash Write (%0d bytes)", PAYLOAD_SIZE);
 
-        // Send payload bytes (256 bytes)
-        for (i = 0; i < 256; i = i + 1) begin
-            send_byte(i[7:0], (i == 255));
+        // Small delay for flash erase to complete (simulated ~16 cycles)
+        #(CLK_PERIOD * 50);
+
+        // Send payload bytes (0x00 through 0xFF)
+        byte_count = 0;
+        for (i = 0; i < PAYLOAD_SIZE; i = i + 1) begin
+            send_byte(i[7:0], (i == PAYLOAD_SIZE - 1));
         end
 
-        // Wait for flash operations
-        #(CLK_PERIOD * 200);
+        $display("  %0d payload bytes sent", byte_count);
+
+        // Wait for flash write to complete and orch to reach DONE
+        wait_for_state(O_DONE, 5000);
+
+        check(update_done, "Update completed successfully");
+        check(!update_error, "No error during update");
+        check(bytes_transferred > 0, "Bytes transferred > 0");
         $display("  Bytes transferred: %0d", bytes_transferred);
+        $display("  Active slot: %0s", active_slot ? "B" : "A");
         $display("");
 
         // =====================================================================
-        // TEST 6: Boot watchdog
+        // TEST 6: Watchdog Boot Monitoring
         // =====================================================================
         $display("[TEST 6] Watchdog Boot Monitoring");
 
-        // Simulate successful boot
-        #(CLK_PERIOD * 50);
-        boot_complete <= 1;
-        #(CLK_PERIOD * 2);
-        boot_complete <= 0;
-
-        #(CLK_PERIOD * 50);
+        // The watchdog should be tracking the boot of the new bitstream
         $display("  Watchdog active: %0b", watchdog_active);
+
+        // Simulate successful boot: assert boot_complete for one cycle
+        #(CLK_PERIOD * 10);
+        boot_complete <= 1;
+        @(posedge clk);
+        boot_complete <= 0;
+        #(CLK_PERIOD * 10);
+
+        $display("  Watchdog active after boot_complete: %0b", watchdog_active);
+        check(!rollback_occurred, "No rollback occurred");
         $display("");
 
-        // Clean up
+        // =====================================================================
+        // TEST 7: Clean Shutdown
+        // =====================================================================
+        $display("[TEST 7] Clean Shutdown");
+
         update_enable <= 0;
         #(CLK_PERIOD * 20);
+
+        check(update_state == O_IDLE, "Returned to IDLE after disable");
+        check(!update_busy, "Not busy after shutdown");
+        $display("");
 
         // =====================================================================
         // RESULTS
@@ -433,7 +564,12 @@ module update_tb;
 
     initial begin
         #(CLK_PERIOD * 500_000);
+        $display("");
         $display("ERROR: Simulation timeout!");
+        $display("  Final state: %0d", update_state);
+        $display("  update_busy: %0b", update_busy);
+        $display("  update_error: %0b", update_error);
+        $display("");
         $finish;
     end
 

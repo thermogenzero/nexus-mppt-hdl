@@ -2,20 +2,33 @@
 # nexus-mppt-hdl Build System
 # =============================================================================
 # Target: Lattice Nexus 40K (LIFCL-40)
-# Toolchain: Lattice Radiant + open-source (Yosys/nextpnr) for simulation
+# Toolchain:
+#   Simulation  — iverilog + vvp
+#   Synthesis   — Yosys (synth_nexus)
+#   Place&Route — nextpnr-nexus (Project Oxide / prjoxide)
+#   Bitstream   — prjoxide pack
+#   Programming — openFPGALoader
 # =============================================================================
 
 PROJ = nexus_mppt
-TOP = top
+TOP  = top
 
-# Toolchain selection
-RADIANT ?= 1
-YOSYS  ?= $(shell which yosys 2>/dev/null)
-IVERILOG ?= $(shell which iverilog 2>/dev/null)
+# Target device (Lattice CrossLink-NX / Nexus family)
+# LIFCL-40: 40K LUTs, -9 speed, BG400 package, C commercial temp
+DEVICE ?= LIFCL-40-9BG400C
+
+# Tool paths (override with environment or command line)
+YOSYS         ?= $(shell which yosys 2>/dev/null)
+NEXTPNR       ?= $(shell which nextpnr-nexus 2>/dev/null)
+PRJOXIDE      ?= $(shell which prjoxide 2>/dev/null)
+IVERILOG      ?= $(shell which iverilog 2>/dev/null)
+VVP           ?= $(shell which vvp 2>/dev/null)
+OPENFPGALOADER ?= $(shell which openFPGALoader 2>/dev/null)
+VERILATOR     ?= $(shell which verilator 2>/dev/null)
 
 # Source files
 RTL_DIR = rtl
-TB_DIR = tb
+TB_DIR  = tb
 
 UPDATE_SRC = \
 	$(RTL_DIR)/update/bitstream_rx.v \
@@ -44,12 +57,12 @@ LPF = constraints/nexus40k.lpf
 
 test: test-update
 
-test-update: $(TB_DIR)/update_tb.v $(UPDATE_SRC) $(SAFETY_SRC)
-	@echo "=== Running Update Module Testbench ==="
-	iverilog -g2012 -Wall -o build/update_tb.vvp \
+test-update: $(TB_DIR)/update_tb.v $(UPDATE_SRC) $(SAFETY_SRC) | build
+	@echo "=== Running Update Subsystem Testbench ==="
+	$(IVERILOG) -g2012 -Wall -o build/update_tb.vvp \
 		-I$(RTL_DIR)/update -I$(RTL_DIR)/safety \
 		$^
-	vvp build/update_tb.vvp
+	$(VVP) build/update_tb.vvp
 	@echo "=== Update Tests Complete ==="
 
 test-mppt:
@@ -58,47 +71,94 @@ test-mppt:
 test-povc:
 	@echo "Phase 2: PoVC testbench not yet implemented"
 
-test-system: $(TB_DIR)/system_tb.v $(ALL_SRC)
+test-system: $(TB_DIR)/system_tb.v $(ALL_SRC) | build
 	@echo "=== Running System Testbench ==="
-	iverilog -g2012 -Wall -o build/system_tb.vvp \
+	$(IVERILOG) -g2012 -Wall -o build/system_tb.vvp \
 		-I$(RTL_DIR) \
 		$^
-	vvp build/system_tb.vvp
+	$(VVP) build/system_tb.vvp
 
 # =============================================================================
 # Lint (Verilator)
 # =============================================================================
 
 lint: $(ALL_SRC)
-	verilator --lint-only -Wall $(ALL_SRC)
+	$(VERILATOR) --lint-only -Wall $(ALL_SRC)
 
 # =============================================================================
-# Synthesis (Lattice Radiant)
+# Synthesis (Yosys — synth_nexus)
 # =============================================================================
+# Yosys targets the Nexus/CrossLink-NX family via synth_nexus, which outputs
+# a JSON netlist consumed by nextpnr-nexus.
 
 .PHONY: synthesis pnr bitstream program
 
-synthesis: build/$(PROJ).vm
+synthesis: build/$(PROJ).json
 	@echo "=== Synthesis Complete ==="
+	@echo "  Device:  $(DEVICE)"
+	@echo "  Netlist: build/$(PROJ).json"
 
-pnr: build/$(PROJ)_pnr.udb
+build/$(PROJ).json: $(ALL_SRC) | build
+	$(YOSYS) -p "\
+		read_verilog $(ALL_SRC); \
+		synth_nexus -top $(TOP) -json $@" \
+		2>&1 | tee build/yosys.log
+
+# =============================================================================
+# Place & Route (nextpnr-nexus — Project Oxide)
+# =============================================================================
+# nextpnr-nexus uses the prjoxide database for Lattice Nexus bitstream
+# documentation.  Output is FASM (FPGA Assembly), converted to bitstream
+# by prjoxide pack.
+
+pnr: build/$(PROJ).fasm
 	@echo "=== Place & Route Complete ==="
+
+build/$(PROJ).fasm: build/$(PROJ).json $(LPF) | build
+	$(NEXTPNR) \
+		--device $(DEVICE) \
+		--json   build/$(PROJ).json \
+		--lpf    $(LPF) \
+		--fasm   $@ \
+		2>&1 | tee build/nextpnr.log
+
+# =============================================================================
+# Bitstream Generation (prjoxide pack)
+# =============================================================================
 
 bitstream: build/$(PROJ).bit
 	@echo "=== Bitstream Generated ==="
+	@echo "  File: build/$(PROJ).bit"
 
-build/$(PROJ).vm: $(ALL_SRC) $(LPF)
-	@mkdir -p build
-	cd build && radiantc ../scripts/build.tcl
+build/$(PROJ).bit: build/$(PROJ).fasm | build
+	$(PRJOXIDE) pack $< $@
 
-build/$(PROJ)_pnr.udb: build/$(PROJ).vm
-	cd build && radiantc ../scripts/pnr.tcl
-
-build/$(PROJ).bit: build/$(PROJ)_pnr.udb
-	cd build && radiantc ../scripts/bitgen.tcl
+# =============================================================================
+# Programming (openFPGALoader)
+# =============================================================================
 
 program: build/$(PROJ).bit
-	python3 scripts/program.py --bitstream $< --device nexus40k
+	$(OPENFPGALOADER) --bitstream $<
+
+program-flash: build/$(PROJ).bit
+	$(OPENFPGALOADER) --write-flash $<
+
+# =============================================================================
+# Full build pipeline
+# =============================================================================
+
+all: test synthesis pnr bitstream
+	@echo ""
+	@echo "=== Full Build Complete ==="
+	@echo "  Tests:     PASSED"
+	@echo "  Bitstream: build/$(PROJ).bit"
+
+# =============================================================================
+# Waveform viewer (GTKWave)
+# =============================================================================
+
+waves: build/update_tb.vcd
+	gtkwave $< &
 
 # =============================================================================
 # Utility
@@ -108,6 +168,6 @@ build:
 	@mkdir -p build
 
 clean:
-	rm -rf build/*.vvp build/*.vcd build/*.vm build/*.udb build/*.bit
+	rm -rf build/*.vvp build/*.vcd build/*.json build/*.fasm build/*.bit build/*.log
 
 .DEFAULT_GOAL := test

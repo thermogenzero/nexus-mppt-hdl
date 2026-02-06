@@ -179,12 +179,28 @@ module ml_dsa87_verify #(
                     busy         <= 1'b0;
 
                     if (verify_start) begin
-                        state        <= S_LOAD_SIG;
                         busy         <= 1'b1;
-                        sig_ready    <= 1'b1;
-                        sig_byte_cnt <= 32'd0;
-                        sig_complete <= 1'b0;
                         timeout_cnt  <= 32'd0;
+
+                        // Two modes:
+                        // 1. Streamed signature (sig_valid asserted on same
+                        //    cycle as verify_start) → buffer via S_LOAD_SIG
+                        // 2. Hash-only mode (Phase 1): signature hash already
+                        //    in msg_hash from the header → skip straight to
+                        //    verification backend
+                        if (sig_valid) begin
+                            state        <= S_LOAD_SIG;
+                            sig_ready    <= 1'b1;
+                            sig_byte_cnt <= 32'd0;
+                            sig_complete <= 1'b0;
+                        end else begin
+                            sig_complete <= 1'b1;
+                            if (use_tssp) begin
+                                state <= S_SEND_TSSP;
+                            end else begin
+                                state <= S_SEND_CRYPTO;
+                            end
+                        end
                     end
                 end
 
